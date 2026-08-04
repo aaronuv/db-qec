@@ -1,0 +1,303 @@
+clear all
+
+rng('default');
+
+rand(4)
+
+% pauli matrices
+e{1}=speye(2);
+e{2}=sparse([0 1; 1 0]);
+e{3}=sparse([0 -1i;1i 0]);
+e{4}=sparse([1 0;0 -1]);
+
+sigmap = 0.5*(e{2} + 1i * e{3});
+sigmam = 0.5*(e{2} - 1i * e{3});
+
+I = e{1};
+X = e{2};
+Y = e{3};
+Z = e{4};
+
+function b = bracket(A, B)
+    b = A*B - B*A;
+end
+
+function b = antibracket(A, B)
+    b = A*B + B*A;
+end
+
+function sigma = sigmax(i, n, e)
+    sigma = sparse(1);
+    for k = 1:n
+        if k == i
+            sigma = kron(sigma, e{2});
+        else
+            sigma = kron(sigma, e{1});
+        end
+    end
+end
+
+function sigma = sigmay(i, n, e)
+    sigma = sparse(1);
+    for k = 1:n
+        if k == i
+            sigma = kron(sigma, e{3});
+        else
+            sigma = kron(sigma, e{1});
+        end
+    end
+end
+
+function sigma = sigmaz(i, n, e)
+    sigma = sparse(1);
+    for k = 1:n
+        if k == i
+            sigma = kron(sigma, e{4});
+        else
+            sigma = kron(sigma, e{1});
+        end
+    end
+end
+
+function qubit = build_qubit(theta, phi)
+qubit = cos(theta/2) * [1, 0]' + exp(1i*phi) * sin(theta/2)*[0, 1]';
+end
+
+function dP = build_update_P( ...
+    P, dPQ, dy, Q, A_grid, B_grid, Ato2_grid, commAB_grid, anticomAB_grid, gamma_grid, dt)
+
+    dHSB_error = -1i * gamma_grid{1} * 0.5 * anticomAB_grid{1} * dt + 1i * B_grid{1} * dy{1};
+    dHSB_error = dHSB_error -1i * gamma_grid{2} * 0.5 * anticomAB_grid{2} * dt + 1i * B_grid{2} * dy{2};
+    dHSB_error = dHSB_error -1i * gamma_grid{3} * 0.5 * anticomAB_grid{3} * dt + 1i * B_grid{3} * dy{3};
+
+    dHDB_error = -gamma_grid{1} * bracket(Ato2_grid{1}, Q)*dt...
+           - 0.5*gamma_grid{1} * bracket(commAB_grid{1}, Q)*dt ...
+           + dy{1} * bracket(A_grid{1}, Q);
+    dHDB_error = dHDB_error -gamma_grid{2} * bracket(Ato2_grid{2}, Q)*dt...
+           - 0.5*gamma_grid{2} * bracket(commAB_grid{2}, Q)*dt ...
+           + dy{2} * bracket(A_grid{2}, Q);
+    dHDB_error = dHDB_error -gamma_grid{3} * bracket(Ato2_grid{3}, Q)*dt...
+           - 0.5*gamma_grid{3} * bracket(commAB_grid{3}, Q)*dt ...
+           + dy{3} * bracket(A_grid{3}, Q);
+    dHDB_error = 1i * dHDB_error;
+
+    dHDB_error_corr = ...
+        -gamma_grid{4} * bracket(Ato2_grid{4}, dPQ)*dt ...
+        -gamma_grid{5} * bracket(Ato2_grid{5}, dPQ)*dt ...
+        -gamma_grid{6} * bracket(Ato2_grid{6}, dPQ)*dt ...
+        - 0.5*gamma_grid{4} * bracket(commAB_grid{4}, dPQ)*dt ...
+        - 0.5*gamma_grid{5} * bracket(commAB_grid{5}, dPQ)*dt ...
+        - 0.5*gamma_grid{6} * bracket(commAB_grid{6}, dPQ)*dt ...
+        + dy{4} * bracket(A_grid{4}, dPQ) ...
+        + dy{5} * bracket(A_grid{5}, dPQ) ...
+        + dy{6} * bracket(A_grid{6}, dPQ);
+    dHDB_error_corr = 1i* dHDB_error_corr;
+
+    dHtotal = dHSB_error + dHDB_error + dHDB_error_corr;
+
+    dbracket_total = -1i * bracket(dHtotal, P);
+    P_pivot = P + dbracket_total;
+    [v, ~] = eigs(P_pivot, 1, 'largestreal');
+    P_pivot = v*v';
+
+    dPQ_pivot = P_pivot - Q;
+
+    dHDB_error_corr = ...
+        -gamma_grid{4} * bracket(Ato2_grid{4}, dPQ_pivot)*dt ...
+        -gamma_grid{5} * bracket(Ato2_grid{5}, dPQ_pivot)*dt ...
+        -gamma_grid{6} * bracket(Ato2_grid{6}, dPQ_pivot)*dt ...
+        - 0.5*gamma_grid{4} * bracket(commAB_grid{4}, dPQ_pivot)*dt ...
+        - 0.5*gamma_grid{5} * bracket(commAB_grid{5}, dPQ_pivot)*dt ...
+        - 0.5*gamma_grid{6} * bracket(commAB_grid{6}, dPQ_pivot)*dt ...
+        + dy{4} * bracket(A_grid{4}, dPQ_pivot) ...
+        + dy{5} * bracket(A_grid{5}, dPQ_pivot) ...
+        + dy{6} * bracket(A_grid{6}, dPQ_pivot);
+    dHDB_error_corr = 1i* dHDB_error_corr;
+
+    dHtotal_pivot = dHSB_error + dHDB_error + dHDB_error_corr;
+
+    dbracket_total_pivot = -1i * bracket(dHtotal_pivot, P_pivot);
+
+    dP = 0.5 * (dbracket_total + dbracket_total_pivot);
+end
+
+n = 3;
+N = 2^n;
+
+T = 1;
+
+gamma_grid{1} = 1;    % X1
+gamma_grid{2} = 1;    % X2
+gamma_grid{3} = 1;    % X3
+gamma_grid{4} = 64;      % C4
+gamma_grid{5} = 64;      % C5
+gamma_grid{6} = 64;      % C6
+
+L = 500;
+dt = T/L;
+n_traj = 50;                     % number of trajectories
+
+%tol_diff = 1e-15;
+%tol_overlap = 1e-1;
+
+tol_diff = -1;
+tol_overlap = -1;
+%q = [1, 0]';
+
+%q = build_qubit(2*pi/4, 0*pi/2);
+%q = [1, 1].';
+%q = [1, 0].';
+%q = kron(q, q);
+
+Phip = [1, 0, 0, 1].'; % Bell Phi +
+Phim = [1, 0, 0, -1].'; % Bell Phi -
+Psip = [0, 1, 1, 0].'; % Psi +
+Psim = [0, 1, -1, 0].'; % Psi -
+
+e000 = sparse(zeros(N, 1));
+e000(1) = 1;
+
+e111 = sparse(zeros(N, 1));
+e111(end) = 1;
+
+Q = e000*e000' + e111*e111';
+
+%p_q = 0.75;
+%q = sqrt(p_q)*e00 + sqrt(1 - p_q)*e11;
+
+q = e000;
+q = q/norm(q);
+
+% Q = q*q';
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+X1 = kron(kron(X, I), I);
+X2 = kron(kron(I, X), I);
+X3 = kron(kron(I, I), X);
+
+Z1Z2 = kron(kron(Z, Z), I);
+Z2Z3 = kron(I, kron(Z, Z));
+Z1Z3 = kron(Z, kron(I, Z));  % <-- Added for C6
+
+C1 = X1;
+C2 = X2;
+C3 = X3;
+
+C4 = X1 * (speye(N) - Z1Z2)/2;
+C5 = X2 * (speye(N) - Z2Z3)/2;
+C6 = X3 * (speye(N) - Z1Z3)/2;   % <-- Added C6
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+A_grid{1} = 0.5 * (C1 + C1');
+B_grid{1} = 0.5 * (C1 - C1');
+
+A_grid{2} = 0.5 * (C2 + C2');
+B_grid{2} = 0.5 * (C2 - C2');
+
+A_grid{3} = 0.5 * (C3 + C3');
+B_grid{3} = 0.5 * (C3 - C3');
+
+A_grid{4} = 0.5 * (C4 + C4');
+B_grid{4} = 0.5 * (C4 - C4');
+
+A_grid{5} = 0.5 * (C5 + C5');
+B_grid{5} = 0.5 * (C5 - C5');
+
+A_grid{6} = 0.5 * (C6 + C6');       % <-- Added for C6
+B_grid{6} = 0.5 * (C6 - C6');       % <-- Added for C6
+
+commAB_grid{1} = bracket(A_grid{1}, B_grid{1});
+commAB_grid{2} = bracket(A_grid{2}, B_grid{2});
+commAB_grid{3} = bracket(A_grid{3}, B_grid{3});
+commAB_grid{4} = bracket(A_grid{4}, B_grid{4});
+commAB_grid{5} = bracket(A_grid{5}, B_grid{5});
+commAB_grid{6} = bracket(A_grid{6}, B_grid{6});    % <-- Added for C6
+
+anticomAB_grid{1} = antibracket(A_grid{1}, B_grid{1});
+anticomAB_grid{2} = antibracket(A_grid{2}, B_grid{2});
+anticomAB_grid{3} = antibracket(A_grid{3}, B_grid{3});
+anticomAB_grid{4} = antibracket(A_grid{4}, B_grid{4});
+anticomAB_grid{5} = antibracket(A_grid{5}, B_grid{5});
+anticomAB_grid{6} = antibracket(A_grid{6}, B_grid{6});    % <-- Added for C6
+
+Ato2_grid{1} = A_grid{1}*A_grid{1};
+Ato2_grid{2} = A_grid{2}*A_grid{2};
+Ato2_grid{3} = A_grid{3}*A_grid{3};
+Ato2_grid{4} = A_grid{4}*A_grid{4};
+Ato2_grid{5} = A_grid{5}*A_grid{5};
+Ato2_grid{6} = A_grid{6}*A_grid{6};            % <-- Added for C6
+
+update_P = @(P, dPQ, dy) build_update_P( ...
+    P, dPQ, dy, Q, A_grid, B_grid, Ato2_grid, commAB_grid, anticomAB_grid, gamma_grid, dt);
+
+dw1 = sqrt(gamma_grid{1}*dt) * randn(L, n_traj);   % all noise in one shot
+dw2 = sqrt(gamma_grid{2}*dt) * randn(L, n_traj);
+dw3 = sqrt(gamma_grid{3}*dt) * randn(L, n_traj);
+dw4 = sqrt(gamma_grid{4}*dt) * randn(L, n_traj);
+dw5 = sqrt(gamma_grid{5}*dt) * randn(L, n_traj);
+dw6 = sqrt(gamma_grid{6}*dt) * randn(L, n_traj);   % <-- Added for C6
+
+%psi0 = [1, 0].';
+%psi0 = kron(psi0, psi0);
+
+psi0 = q + 0.*(randn(N, 1) + 1i*randn(N, 1));
+%psi0 = q + 0.1*randn(4, 1);
+
+psi0 = psi0/norm(psi0);
+P0   = psi0*psi0';           % save initial state once
+
+F_all = zeros(L, n_traj);    % one column per trajectory
+
+m = zeros(3, n_traj, L);
+
+for j = 1:n_traj
+    P = P0;                  % reset to initial state for each trajectory
+    for t = 1:L
+        dy{1} = 2*gamma_grid{1}*trace(A_grid{1}*P)*dt + dw1(t, j);
+        dy{2} = 2*gamma_grid{2}*trace(A_grid{2}*P)*dt + dw2(t, j);
+        dy{3} = 2*gamma_grid{3}*trace(A_grid{3}*P)*dt + dw3(t, j);
+        dy{4} = 2*gamma_grid{4}*trace(A_grid{4}*P)*dt + dw4(t, j);
+        dy{5} = 2*gamma_grid{5}*trace(A_grid{5}*P)*dt + dw5(t, j);
+        dy{6} = 2*gamma_grid{6}*trace(A_grid{6}*P)*dt + dw6(t, j);   % <-- Added for C6
+
+        dPQ = P - Q;
+        P = P + update_P(P, dPQ, dy);
+        [v, ~] = eigs(P, 1, 'largestreal');
+        P = v*v';
+        % m(1, j, t) = trace(e{2}*P);
+        % m(2, j, t) = trace(e{3}*P);
+        % m(3, j, t) = trace(e{4}*P);
+
+        overlap = real(trace(P*Q));
+        F_all(t, j) = overlap;
+    end
+end
+
+times = dt * (1:L);
+
+epsilon = 1e-2;
+infidelity = 1-F_all;
+% count = sum(infidelity(end, :) < epsilon, "all")/n_traj;
+% fprintf("relative frequency for %f: %.2f \n", epsilon, count);
+
+figure(1);
+semilogy(times, abs(1 - F_all));
+xlabel('t');
+ylabel('1 - F');
+grid on;
+
+figure(2)
+semilogy(times, abs(mean(F_all, 2)), 'k');
+xlabel('time')
+ylabel('F')
+% semilogy(times, abs(1 - mean(F_all, 2)), 'k');
+% hold on
+% quant = quantile(abs(1 - F_all), [0.5, 0.8], 2);  % size: [length(times) 2]
+% semilogy(times, quant(:,1), 'b-');        % median in blue
+% hold on
+% semilogy(times, quant(:,2), 'r-');        % 0.8-quantile in red
+% hold off
+
+%filename = sprintf("bell_weak.mat");
+%save(filename, "T", "times", "F_all");
