@@ -81,6 +81,7 @@ def measurement_increments(rho, A, gamma, dw, dt):
     expect = jnp.real(jnp.einsum("cij,tji->tc", A, rho))
     return 2.0 * gamma[None, :] * expect * dt + dw
 
+
 def build_dhsb(gamma, anticomAB, B, dy, dt):
     """
     SB process dH^SB (state-independent operator process).
@@ -293,7 +294,7 @@ def one_step(
     )
 
 
-def run_trajectories(
+def run_trajectories_strato(
     rho0,
     key,
     n_steps,
@@ -322,6 +323,144 @@ def run_trajectories(
     def body(rho, dw_pair):
         dw_e, dw_c = dw_pair
         rho = one_step(
+            rho,
+            dw_e,
+            dw_c,
+            pack_error,
+            pack_ec,
+            gamma_error,
+            gamma_ec,
+            Omega1,
+            Omega2,
+            dt,
+        )
+        return rho, rho
+
+    _, rho_all = lax.scan(body, rho0, (dw_error, dw_ec))
+    return rho_all
+
+
+# --- Ito SME (Wiseman–Milburn feedback form) ---------------------------------
+
+
+def dissipator_D(C, rho):
+    """
+    Per-channel Lindblad dissipator
+        D[C]ρ = C ρ C† − ½ {C† C, ρ}
+
+    C:   (n_ch, N, N)
+    rho: (n_traj, N, N)
+    Returns: (n_ch, n_traj, N, N)
+    """
+    Cd = jnp.conj(jnp.swapaxes(C, -1, -2))
+    Cr = jnp.matmul(C[:, None, :, :], rho[None, :, :, :])
+    C_rho_Cd = jnp.matmul(Cr, Cd[:, None, :, :])
+    CdC = jnp.matmul(Cd, C)
+    anticom = antibracket(CdC[:, None, :, :], rho[None, :, :, :])
+    return C_rho_Cd - 0.5 * anticom
+
+
+def superop_H(C, rho):
+    """
+    Per-channel measurement (innovation) superoperator
+        H[C]ρ = C ρ + ρ C† − Tr((C + C†) ρ) ρ
+
+    C:   (n_ch, N, N)
+    rho: (n_traj, N, N)
+    Returns: (n_ch, n_traj, N, N)
+    """
+    Cd = jnp.conj(jnp.swapaxes(C, -1, -2))
+    Cr = jnp.matmul(C[:, None, :, :], rho[None, :, :, :])
+    rCd = jnp.matmul(rho[None, :, :, :], Cd[:, None, :, :])
+    expect = jnp.real(jnp.einsum("cij,tji->ct", C + Cd, rho))
+    return Cr + rCd - expect[:, :, None, None] * rho[None, :, :, :]
+
+
+def build_HF(Omega1, Omega2, J):
+    """
+    Feedback Hamiltonian (summed over EC channels)
+        H_F = Σ_a [ ½ (Ω₂_a J_a + J_a† Ω₂_a) + Ω₁_a ]
+
+    Omega1, Omega2, J: (n_ec, N, N)
+    Returns: (N, N)
+    """
+    Jd = jnp.conj(jnp.swapaxes(J, -1, -2))
+    return jnp.sum(
+        0.5 * (jnp.matmul(Omega2, J) + jnp.matmul(Jd, Omega2)) + Omega1,
+        axis=0,
+    )
+
+
+def one_step_ito(
+    rho,
+    dw_error,
+    dw_ec,
+    pack_error,
+    pack_ec,
+    gamma_error,
+    gamma_ec,
+    Omega1,
+    Omega2,
+    dt,
+):
+    """
+    One Ito / Euler–Maruyama step for the feedback SME
+        dρ = −i [H_F, ρ] dt + Σ γ D[L] ρ dt + Σ H[L] ρ dW
+
+    with error jumps L = J^E, EC jumps L = C = J^C − i Ω₂, and
+        H_F = ½ (Ω₂ J^C + (J^C)† Ω₂) + Ω₁
+    (sums over channels understood).
+
+    Same argument layout as one_step. dw_* ~ N(0, γ dt).
+    """
+    J_error = pack_error["A"] + pack_error["B"]
+    J_ec = pack_ec["A"] + pack_ec["B"]
+    C_ec = J_ec - 1j * Omega2
+
+    HF = build_HF(Omega1, Omega2, J_ec)
+
+    drift = (
+        -1j * bracket(HF[None, :, :], rho)
+        + jnp.einsum("c,ctij->tij", gamma_error, dissipator_D(J_error, rho))
+        + jnp.einsum("c,ctij->tij", gamma_ec, dissipator_D(C_ec, rho))
+    )
+    diff = (
+        jnp.einsum("tc,ctij->tij", dw_error, superop_H(J_error, rho))
+        + jnp.einsum("tc,ctij->tij", dw_ec, superop_H(C_ec, rho))
+    )
+    return project_pure(rho + drift * dt + diff)
+
+
+def run_trajectories_ito(
+    rho0,
+    key,
+    n_steps,
+    pack_error,
+    pack_ec,
+    gamma_error,
+    gamma_ec,
+    Omega1,
+    Omega2,
+    dt,
+):
+    """
+    Scan one_step_ito over time for a batch of trajectories.
+
+    Drop-in Ito counterpart of run_trajectories (same signature / return).
+    Returns rho_all: (n_steps, n_traj, N, N)
+    """
+    n_traj = rho0.shape[0]
+    key_e, key_c = random.split(key)
+    dw_error = jnp.sqrt(gamma_error * dt) * random.normal(
+        key_e, (n_steps, n_traj, gamma_error.shape[0])
+    )
+    dw_ec = jnp.sqrt(gamma_ec * dt) * random.normal(
+        key_c, (n_steps, n_traj, gamma_ec.shape[0])
+    )
+
+    def body(rho, dw_pair):
+        dw_e, dw_c = dw_pair
+        rho = one_step_ito(
             rho,
             dw_e,
             dw_c,
