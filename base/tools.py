@@ -376,19 +376,18 @@ def superop_H(C, rho):
     return Cr + rCd - expect[:, :, None, None] * rho[None, :, :, :]
 
 
-def build_HF(Omega1, Omega2, J):
+def build_HF(Omega1, Omega2, J, gamma_ec):
     """
-    Feedback Hamiltonian (summed over EC channels)
-        H_F = Σ_a [ ½ (Ω₂_a J_a + J_a† Ω₂_a) + Ω₁_a ]
+    Feedback Hamiltonian (summed over EC channels with each term multiplied by gamma_ec)
+        H_F = Σ_a γ^C [ ½ (Ω₂_a J_a + J_a† Ω₂_a) + Ω₁_a ]
 
     Omega1, Omega2, J: (n_ec, N, N)
+    gamma_ec: (n_ec,)
     Returns: (N, N)
     """
     Jd = jnp.conj(jnp.swapaxes(J, -1, -2))
-    return jnp.sum(
-        0.5 * (jnp.matmul(Omega2, J) + jnp.matmul(Jd, Omega2)) + Omega1,
-        axis=0,
-    )
+    hf_terms = 0.5 * gamma_ec[:, None, None] * (jnp.matmul(Omega2, J) + jnp.matmul(Jd, Omega2)) + Omega1
+    return jnp.sum(hf_terms, axis=0)
 
 
 def one_step_ito(
@@ -408,7 +407,7 @@ def one_step_ito(
         dρ = −i [H_F, ρ] dt + Σ γ D[L] ρ dt + Σ H[L] ρ dW
 
     with error jumps L = J^E, EC jumps L = C = J^C − i Ω₂, and
-        H_F = ½ (Ω₂ J^C + (J^C)† Ω₂) + Ω₁
+        H_F = ½ γ^C (Ω₂ J^C + (J^C)† Ω₂) + Ω₁
     (sums over channels understood).
 
     Same argument layout as one_step. dw_* ~ N(0, γ dt).
@@ -417,7 +416,7 @@ def one_step_ito(
     J_ec = pack_ec["A"] + pack_ec["B"]
     C_ec = J_ec - 1j * Omega2
 
-    HF = build_HF(Omega1, Omega2, J_ec)
+    HF = build_HF(Omega1, Omega2, J_ec, gamma_ec)
 
     drift = (
         -1j * bracket(HF[None, :, :], rho)
