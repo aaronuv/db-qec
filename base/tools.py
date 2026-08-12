@@ -82,6 +82,9 @@ def measurement_increments(rho, A, gamma, dw, dt):
     return 2.0 * gamma[None, :] * expect * dt + dw
 
 
+# WARNING: The Strato implementation of the feedback is wrong.
+# Follow the Ito implementation instead.
+
 def build_dhsb(gamma, anticomAB, B, dy, dt):
     """
     SB process dH^SB (state-independent operator process).
