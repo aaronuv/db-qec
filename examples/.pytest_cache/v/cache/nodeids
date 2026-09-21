@@ -1,0 +1,7 @@
+[
+  "tests/test_ito_causal.py::test_luispe_fb_HF_zero",
+  "tests/test_ito_causal.py::test_luispe_fb_HF_zero_expanded_jumps",
+  "tests/test_ito_causal.py::test_luispe_fb_zero_error_infidelity_zero_ito",
+  "tests/test_ito_causal.py::test_luispe_fb_zero_error_infidelity_zero_ito_nomonitor",
+  "tests/test_ito_causal.py::test_luispe_fb_zero_error_infidelity_zero_strato"
+]

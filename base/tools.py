@@ -181,6 +181,21 @@ def project_pure(rho):
     return v[..., :, None] * jnp.conj(v[..., None, :])
 
 
+def project_psd(rho):
+    """
+    Project onto density matrices: Hermitize, clip eigenvalues to ≥ 0, renormalize.
+
+    Stabilizes mixed-state SME steps (Euler–Maruyama) without forcing purity.
+    rho: (..., N, N) -> (..., N, N)
+    """
+    herm = 0.5 * (rho + jnp.conj(jnp.swapaxes(rho, -1, -2)))
+    evals, evecs = jnp.linalg.eigh(herm)
+    evals = jnp.maximum(evals.real, 0.0)
+    rho = jnp.einsum("...ij,...j,...kj->...ik", evecs, evals, jnp.conj(evecs))
+    tr = jnp.real(jnp.trace(rho, axis1=-2, axis2=-1))
+    return rho / tr[..., None, None]
+
+
 def build_omega_corrections(rho, Omega2, H2, gamma_ec, dt):
     """
     Feedback / causality corrections (sum over EC channels):
@@ -477,4 +492,87 @@ def run_trajectories_ito(
         return rho, rho
 
     _, rho_all = lax.scan(body, rho0, (dw_error, dw_ec))
+    return rho_all
+
+# ============================================================================
+# ============================================================================
+ 
+# Ito unraveling WITHOUT monitoring the error channels
+# (Renamed to differentiate from the monitored case)
+
+def one_step_ito_nomonitor(
+    rho,
+    dw_ec,
+    pack_error,
+    pack_ec,
+    gamma_error,
+    gamma_ec,
+    Omega1,
+    Omega2,
+    dt,
+):
+    """
+    One Ito / Euler–Maruyama step with unmonitored errors and monitored EC:
+        dρ = −i [H_F, ρ] dt
+             + Σ γ^E D[J^E] ρ dt + Σ γ^C D[C] ρ dt
+             + Σ H[C] ρ dW^C
+
+    C = J^C − i Ω₂, H_F = ½ γ^C (Ω₂ J^C + (J^C)† Ω₂) + Ω₁.
+    Errors contribute only the Lindblad drift (no dW^E). The state stays mixed;
+    each step is regularized by PSD projection (not pure-state projection).
+    """
+    J_error = pack_error["A"] + pack_error["B"]
+    J_ec = pack_ec["A"] + pack_ec["B"]
+    C_ec = J_ec - 1j * Omega2
+
+    HF = build_HF(Omega1, Omega2, J_ec, gamma_ec)
+
+    drift = (
+        -1j * bracket(HF[None, :, :], rho)
+        + jnp.einsum("c,ctij->tij", gamma_error, dissipator_D(J_error, rho))
+        + jnp.einsum("c,ctij->tij", gamma_ec, dissipator_D(C_ec, rho))
+    )
+    diff = jnp.einsum("tc,ctij->tij", dw_ec, superop_H(C_ec, rho))
+    return project_psd(rho + drift * dt + diff)
+
+
+def run_trajectories_ito_nomonitor(
+    rho0,
+    key,
+    n_steps,
+    pack_error,
+    pack_ec,
+    gamma_error,
+    gamma_ec,
+    Omega1,
+    Omega2,
+    dt,
+):
+    """
+    Scan one_step_ito_nomonitor over time for a batch of trajectories.
+
+    Drop-in Ito counterpart of run_trajectories without monitored error channels (same signature / return).
+    Returns rho_all: (n_steps, n_traj, N, N)
+    """
+    n_traj = rho0.shape[0]
+    # Only EC channels are monitored (dw_ec). No dw_error.
+    dw_ec = jnp.sqrt(gamma_ec * dt) * random.normal(
+        key, (n_steps, n_traj, gamma_ec.shape[0])
+    )
+
+    def body(rho, dw_c):
+        rho = one_step_ito_nomonitor(
+            rho,
+            dw_c,
+            pack_error,
+            pack_ec,
+            gamma_error,
+            gamma_ec,
+            Omega1,
+            Omega2,
+            dt,
+        )
+        return rho, rho
+
+    _, rho_all = lax.scan(body, rho0, dw_ec)
     return rho_all
